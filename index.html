@@ -55,6 +55,19 @@ label{display:block;font-size:.85rem;color:var(--mute);margin-bottom:3px}
 <div class="wrap">
   <h1>Stockroom</h1>
   <p class="sub">Your inventory, costs and intended sale prices in one place.</p>
+  <div id="auth" class="stat" hidden style="max-width:380px;padding:16px">
+    <b style="font-size:1.1rem">Sign in to your inventory</b>
+    <div style="margin:12px 0 8px"><label for="email">Email</label><input id="email" type="email" autocomplete="username"></div>
+    <div style="margin-bottom:12px"><label for="pw">Password (6 or more characters)</label><input id="pw" type="password" autocomplete="current-password"></div>
+    <div class="bar" style="margin:0"><button class="pri" id="signin">Sign in</button><button id="signup">Create account</button></div>
+    <p id="authmsg" class="note" style="margin:10px 0 0"></p>
+  </div>
+  <div id="app" hidden>
+  <div class="bar" style="justify-content:space-between;align-items:center">
+    <span id="who" class="note" style="margin:0"></span>
+    <span><span id="status" class="note" style="margin:0 10px 0 0"></span><button id="signout">Sign out</button></span>
+  </div>
+  <div class="stat" id="mig" hidden style="margin-bottom:12px"><span></span> <button id="migbtn" class="pri" style="margin-top:6px">Move them to my account</button></div>
   <div class="stats" id="stats"></div>
   <div class="bar">
     <input id="q" type="search" placeholder="Search, or scan a UPC here" aria-label="Search">
@@ -65,7 +78,8 @@ label{display:block;font-size:.85rem;color:var(--mute);margin-bottom:3px}
     <input id="file" type="file" accept=".csv" hidden>
   </div>
   <div class="items" id="list"></div>
-  <p class="note">Scan with your phone camera, or use a USB/Bluetooth barcode scanner in the search box. Saved in this browser on this device. Use Export CSV to back up or move your data.</p>
+  <p class="note">Your inventory is saved to your account online, so it works on any phone or computer where you sign in. Export CSV makes a backup copy.</p>
+  </div>
 </div>
 
 <dialog id="dlg">
@@ -88,7 +102,7 @@ label{display:block;font-size:.85rem;color:var(--mute);margin-bottom:3px}
     </div>
     <div class="foot">
       <button type="button" id="cancel">Cancel</button>
-      <button class="pri" type="submit">Save item</button>
+      <button class="pri" id="savebtn" type="submit">Save item</button>
     </div>
   </form>
 </dialog>
@@ -102,12 +116,18 @@ label{display:block;font-size:.85rem;color:var(--mute);margin-bottom:3px}
 </dialog>
 
 <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="config.js"></script>
 <script>
 (function(){
 var KEY="stockroom.items.v1",items=[],editId=null;
 var $=function(i){return document.getElementById(i)};
-function load(){try{items=JSON.parse(localStorage.getItem(KEY)||"[]")}catch(e){items=[]}if(!Array.isArray(items))items=[]}
-function save(){try{localStorage.setItem(KEY,JSON.stringify(items))}catch(e){alert("Could not save in this browser. Export a CSV to keep your data.")}}
+var CFG=window.APP_CONFIG||{},sb=null,user=null,BUCKET="photos",photoNote="";
+var NUMS=["qty","cost","retail","sale","low"];
+function busy(m){$("status").textContent=m||""}
+function fail(e){busy("");alert((e&&e.message)||"Something went wrong. Please try again.")}
+function fromRow(r){var o={id:r.id};F.forEach(function(f){var v=r[f];o[f]=NUMS.indexOf(f)>-1?(v==null?"":Number(v)):(v==null?"":v)});return o}
+function toRow(o){var r={};F.forEach(function(f){var v=o[f];r[f]=NUMS.indexOf(f)>-1?(v===""||v==null?null:Number(v)):(v==null?"":String(v))});if(r.qty==null)r.qty=0;return r}
 function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]})}
 function money(n){return(n===""||n==null||isNaN(n))?"-":"$"+Number(n).toFixed(2)}
 function num(v){return v===""||v==null?"":Number(v)}
@@ -142,22 +162,52 @@ function openForm(it){
 }
 $("add").onclick=function(){openForm(null)};
 $("cancel").onclick=function(){$("dlg").close()};
-$("form").onsubmit=function(e){
+async function keepPhoto(u){
+  if(!u||!/^https?:\/\//i.test(u))return u;
+  if(CFG.SUPABASE_URL&&u.indexOf(CFG.SUPABASE_URL+"/storage/")===0)return u;
+  try{
+    var r=await fetch("/.netlify/functions/image?u="+encodeURIComponent(u));
+    if(!r.ok)throw new Error("no image");
+    var b=await r.blob(),t=b.type||"image/jpeg",ext=(t.split("/")[1]||"jpg").replace("jpeg","jpg").replace(/[^a-z0-9]/g,"");
+    var path=user.id+"/"+(window.crypto&&crypto.randomUUID?crypto.randomUUID():Date.now()+"")+"."+ext;
+    var up=await sb.storage.from(BUCKET).upload(path,b,{contentType:t,cacheControl:"31536000"});
+    if(up.error)throw up.error;
+    return sb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl;
+  }catch(e){photoNote="Saved with the original photo link because a copy could not be made.";return u}
+}
+function delPhoto(u){var m=String(u||"").match(/\/object\/public\/photos\/(.+)$/);if(m){try{sb.storage.from(BUCKET).remove([decodeURIComponent(m[1])])}catch(e){}}}
+$("form").onsubmit=async function(e){
   e.preventDefault();
-  var o={};F.forEach(function(f){o[f]=$(f).value.trim()});
-  ["qty","cost","retail","sale","low"].forEach(function(f){o[f]=num(o[f])});
-  if(editId){var i=items.findIndex(function(x){return x.id===editId});o.id=editId;items[i]=o}
-  else{o.id=Date.now().toString(36)+Math.random().toString(36).slice(2,6);items.unshift(o)}
-  save();render();$("dlg").close();
+  var btn=$("savebtn");btn.disabled=true;busy("Saving...");photoNote="";
+  try{
+    var o={};F.forEach(function(f){o[f]=$(f).value.trim()});
+    o.img=await keepPhoto(o.img);
+    var row=toRow(o),r;
+    if(editId)r=await sb.from("items").update(row).eq("id",editId).select().single();
+    else r=await sb.from("items").insert(row).select().single();
+    if(r.error)throw r.error;
+    var it=fromRow(r.data);
+    if(editId){var k=items.findIndex(function(x){return x.id===editId});items[k]=it}else items.unshift(it);
+    render();$("dlg").close();busy(photoNote);
+  }catch(err){fail(err)}
+  btn.disabled=false;
 };
-$("list").onclick=function(e){
+async function bump(it,d){
+  try{var q=Math.max(0,(Number(it.qty)||0)+d);
+    var r=await sb.from("items").update({qty:q}).eq("id",it.id);if(r.error)throw r.error;it.qty=q;render()}
+  catch(e){fail(e)}
+}
+$("list").onclick=async function(e){
   var b=e.target.closest("button");if(!b)return;
   var id=b.dataset.e||b.dataset.p||b.dataset.m||b.dataset.d;
   var it=items.find(function(x){return x.id===id});if(!it)return;
-  if(b.dataset.e)openForm(it);
-  else if(b.dataset.p){it.qty=(Number(it.qty)||0)+1;save();render()}
-  else if(b.dataset.m){it.qty=Math.max(0,(Number(it.qty)||0)-1);save();render()}
-  else if(b.dataset.d&&confirm('Delete "'+it.name+'"? This cannot be undone.')){items=items.filter(function(x){return x.id!==id});save();render()}
+  if(b.dataset.e){openForm(it);return}
+  if(b.dataset.p){bump(it,1);return}
+  if(b.dataset.m){bump(it,-1);return}
+  if(!confirm('Delete "'+it.name+'"? This cannot be undone.'))return;
+  try{var r=await sb.from("items").delete().eq("id",id);if(r.error)throw r.error;
+    delPhoto(it.img);items=items.filter(function(x){return x.id!==id});render()}
+  catch(err){fail(err)}
 };
 $("q").oninput=render;
 function csvCell(v){v=String(v==null?"":v);return/[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v}
@@ -181,7 +231,7 @@ $("file").onchange=function(){
       var o={id:Date.now().toString(36)+Math.random().toString(36).slice(2,6)};
       F.forEach(function(k){var v=r[h.indexOf(k)];o[k]=v==null?"":v});
       ["qty","cost","retail","sale","low"].forEach(function(k){o[k]=num(o[k])});return o}).filter(function(o){return o.name});
-    if(added.length&&confirm("Add "+added.length+" items from this file?")){items=added.concat(items);save();render()}
+    if(added.length&&confirm("Add "+added.length+" items from this file?")){importRows(added)}
     else if(!added.length)alert("No items found. Use a file made with Export CSV.");
   };rd.readAsText(f);$("file").value="";
 };
@@ -272,7 +322,7 @@ $("picks").onclick=function(e){var b=e.target.closest("button");if(!b)return;$("
   Array.prototype.forEach.call(this.children,function(x){x.className=x===b?"sel":""})};
 function handleCode(c){
   var it=items.find(function(x){return x.upc===c});
-  if(it){if(confirm('"'+it.name+'" is already in your inventory ('+(Number(it.qty)||0)+' on hand).\n\nOK = add 1 more. Cancel = edit this item.')){it.qty=(Number(it.qty)||0)+1;save();render()}else openForm(it)}
+  if(it){if(confirm('"'+it.name+'" is already in your inventory ('+(Number(it.qty)||0)+' on hand).\n\nOK = add 1 more. Cancel = edit this item.')){bump(it,1)}else openForm(it)}
   else{openForm(null);$("upc").value=c;lookup()}
 }
 $("scanbtn").onclick=function(){startScan(handleCode)};
@@ -289,7 +339,54 @@ $("q").onkeydown=function(e){
   if(e.key!=="Enter")return;var c=norm(this.value);
   if(c){e.preventDefault();this.value="";render();handleCode(c)}};
 $("upc").onkeydown=function(e){if(e.key==="Enter")e.preventDefault()};
-load();render();
+async function loadCloud(){
+  var r=await sb.from("items").select("*").order("created_at",{ascending:false});
+  if(r.error)throw r.error;
+  items=r.data.map(fromRow);render();checkMigrate();
+}
+async function importRows(a){
+  busy("Importing...");
+  try{var r=await sb.from("items").insert(a.map(toRow));if(r.error)throw r.error;await loadCloud();busy("")}
+  catch(e){fail(e)}
+}
+function localItems(){try{var a=JSON.parse(localStorage.getItem(KEY)||"[]");return Array.isArray(a)?a:[]}catch(e){return[]}}
+function checkMigrate(){
+  var n=localItems().length;$("mig").hidden=!n;
+  if(n)$("mig").querySelector("span").textContent=n+" item"+(n===1?"":"s")+" saved on this device can be moved to your account.";
+}
+$("migbtn").onclick=async function(){
+  var a=localItems();if(!a.length)return;
+  busy("Moving items...");
+  try{var r=await sb.from("items").insert(a.filter(function(o){return o&&o.name}).map(toRow));if(r.error)throw r.error;
+    try{localStorage.setItem(KEY+".moved",JSON.stringify(a));localStorage.removeItem(KEY)}catch(e){}
+    await loadCloud();busy("Moved to your account.")}
+  catch(e){fail(e)}
+};
+function showAuth(){user=null;items=[];$("app").hidden=true;$("auth").hidden=false;$("authmsg").textContent=""}
+function enter(u){user=u;$("auth").hidden=true;$("app").hidden=false;$("who").textContent=u.email||"";loadCloud().catch(fail)}
+async function doAuth(mode){
+  var em=$("email").value.trim(),pw=$("pw").value,m=$("authmsg");
+  if(!em||pw.length<6){m.textContent="Enter your email and a password of at least 6 characters.";return}
+  m.textContent="Working...";
+  try{
+    var r=mode==="up"?await sb.auth.signUp({email:em,password:pw}):await sb.auth.signInWithPassword({email:em,password:pw});
+    if(r.error){m.textContent=r.error.message;return}
+    if(!r.data.session){m.textContent="Account created. Check your email to confirm it, then sign in.";return}
+    $("pw").value="";enter(r.data.session.user);
+  }catch(e){m.textContent="Could not reach the sign-in service. Check your connection and try again."}
+}
+$("signin").onclick=function(){doAuth("in")};
+$("signup").onclick=function(){doAuth("up")};
+$("pw").onkeydown=function(e){if(e.key==="Enter"){e.preventDefault();doAuth("in")}};
+$("signout").onclick=async function(){try{await sb.auth.signOut()}catch(e){}showAuth()};
+async function init(){
+  if(!CFG.SUPABASE_URL||!CFG.SUPABASE_KEY||!window.supabase){
+    $("auth").hidden=false;$("authmsg").textContent="Setup needed: add your Supabase address and key to config.js.";return}
+  sb=window.supabase.createClient(CFG.SUPABASE_URL,CFG.SUPABASE_KEY);
+  try{var s=await sb.auth.getSession();if(s.data.session)enter(s.data.session.user);else showAuth()}
+  catch(e){showAuth()}
+}
+init();
 })();
 </script>
 </body>
