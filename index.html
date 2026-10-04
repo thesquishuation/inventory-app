@@ -309,7 +309,7 @@ function lookup(){
   if(!c){m.textContent="Enter or scan a valid UPC first.";return}
   m.textContent="Looking up product...";
   fetch("/.netlify/functions/lookup?upc="+encodeURIComponent(c)).then(function(r){return r.json().then(function(j){return{ok:r.ok,j:j}})}).then(function(x){
-    if(!x.ok){m.textContent=x.j.error||"Lookup failed. Type the details instead.";return}
+    if(!x.ok){m.textContent=(x.j.error||"Lookup failed. Type the details instead.")+(x.j.detail?" ["+x.j.detail+"]":"");return}
     var p=x.j;
     if(!$("name").value)$("name").value=p.title;
     if(!$("cat").value&&p.category)$("cat").value=p.category;
